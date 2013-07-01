@@ -1,10 +1,12 @@
 /*
  * arch/arm/mach-msm/msm_mpdecision.c
  *
- * cpu auto-hotplug/unplug based on system load for MSM dualcore cpus
- * single core while screen is off
+ * This program features:
+ * -cpu auto-hotplug/unplug based on system load for MSM multicore cpus
+ * -single core while screen is off
+ * -extensive sysfs tuneables
  *
- * Copyright (c) 2012, Dennis Rassmann <showp1984@gmail.com>
+ * Copyright (c) 2012-2013, Dennis Rassmann <showp1984@gmail.com>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -23,7 +25,6 @@
 
 #include <linux/earlysuspend.h>
 #include <linux/init.h>
-#include <linux/cpufreq.h>
 #include <linux/workqueue.h>
 #include <linux/completion.h>
 #include <linux/cpu.h>
@@ -31,12 +32,31 @@
 #include <asm-generic/cputime.h>
 #include <linux/hrtimer.h>
 #include <linux/delay.h>
+#include "acpuclock.h"
+
+#define DEBUG 0
 
 #define MPDEC_TAG                       "[MPDEC]: "
-#define MSM_MPDEC_STARTDELAY            70000
-#define MSM_MPDEC_DELAY                 130
+#define MSM_MPDEC_STARTDELAY            20000
+#define MSM_MPDEC_DELAY                 100
 #define MSM_MPDEC_PAUSE                 10000
-#define MSM_MPDEC_IDLE_FREQ             486000
+#define MSM_MPDEC_IDLE_FREQ             384000
+
+struct global_attr {
+	struct attribute attr;
+	ssize_t (*show)(struct kobject *kobj,
+			struct attribute *attr, char *buf);
+	ssize_t (*store)(struct kobject *a, struct attribute *b,
+			 const char *c, size_t count);
+};
+
+#define define_one_global_ro(_name)		\
+static struct global_attr _name =		\
+__ATTR(_name, 0444, show_##_name, NULL)
+
+#define define_one_global_rw(_name)		\
+static struct global_attr _name =		\
+__ATTR(_name, 0644, show_##_name, store_##_name)
 
 enum {
 	MSM_MPDEC_DISABLED = 0,
@@ -46,15 +66,19 @@ enum {
 };
 
 struct msm_mpdec_cpudata_t {
-	struct mutex suspend_mutex;
+	struct mutex hotplug_mutex;
 	int online;
 	int device_suspended;
 	cputime64_t on_time;
+	cputime64_t on_time_total;
+	long long unsigned int times_cpu_hotplugged;
+	long long unsigned int times_cpu_unplugged;
 };
 static DEFINE_PER_CPU(struct msm_mpdec_cpudata_t, msm_mpdec_cpudata);
 
 static struct delayed_work msm_mpdec_work;
-static DEFINE_MUTEX(msm_cpu_lock);
+static struct workqueue_struct *msm_mpdec_workq;
+static DEFINE_MUTEX(mpdec_msm_cpu_lock);
 
 static struct msm_mpdec_tuners {
 	unsigned int startdelay;
@@ -62,25 +86,107 @@ static struct msm_mpdec_tuners {
 	unsigned int pause;
 	bool scroff_single_core;
 	unsigned long int idle_freq;
+	unsigned int max_cpus;
+	unsigned int min_cpus;
 } msm_mpdec_tuners_ins = {
 	.startdelay = MSM_MPDEC_STARTDELAY,
 	.delay = MSM_MPDEC_DELAY,
 	.pause = MSM_MPDEC_PAUSE,
 	.scroff_single_core = true,
 	.idle_freq = MSM_MPDEC_IDLE_FREQ,
+	.max_cpus = CONFIG_NR_CPUS,
+	.min_cpus = 1,
 };
 
-static unsigned int NwNs_Threshold[4] = {12, 0, 0, 7};
-static unsigned int TwTs_Threshold[4] = {140, 0, 0, 140};
+static unsigned int NwNs_Threshold[4] = {35, 0, 0, 5};
+static unsigned int TwTs_Threshold[4] = {250, 0, 0, 250};
 
 extern unsigned int get_rq_info(void);
-extern unsigned long acpuclk_8x60_get_rate(int);
+extern unsigned long acpuclk_get_rate(int);
 
-unsigned int state = MSM_MPDEC_IDLE;
+unsigned int state = MSM_MPDEC_DISABLED;
 bool was_paused = false;
+static cputime64_t mpdec_paused_until = 0;
 
-static int mp_decision(void)
-{
+static unsigned long get_rate(int cpu) {
+	return acpuclk_get_rate(cpu);
+}
+
+static int get_slowest_cpu(void) {
+	int i, cpu = 0;
+	unsigned long rate, slow_rate = 0;
+
+	for (i = 1; i < CONFIG_NR_CPUS; i++) {
+		if (!cpu_online(i))
+			continue;
+		rate = get_rate(i);
+		if (slow_rate == 0)
+			slow_rate = rate;
+
+		if ((rate <= slow_rate) && (slow_rate != 0)) {
+			cpu = i;
+			slow_rate = rate;
+		}
+	}
+
+	return cpu;
+}
+
+static unsigned long get_slowest_cpu_rate(void) {
+	int i = 0;
+	unsigned long rate, slow_rate = 0;
+
+	for (i = 0; i < CONFIG_NR_CPUS; i++) {
+		if (!cpu_online(i))
+			continue;
+		rate = get_rate(i);
+		if ((rate < slow_rate) && (slow_rate != 0))
+			slow_rate = rate;
+		if (slow_rate == 0)
+			slow_rate = rate;
+	}
+
+	return slow_rate;
+}
+
+static bool mpdec_cpu_down(int cpu) {
+	cputime64_t on_time = 0;
+	bool ret;
+	
+	ret = cpu_online(cpu);
+	if (ret) {
+		mutex_lock(&per_cpu(msm_mpdec_cpudata, cpu).hotplug_mutex);
+		cpu_down(cpu);
+		per_cpu(msm_mpdec_cpudata, cpu).online = false;
+		on_time = ktime_to_ms(ktime_get()) - 
+			per_cpu(msm_mpdec_cpudata, cpu).on_time;
+		per_cpu(msm_mpdec_cpudata, cpu).on_time_total += on_time;
+		per_cpu(msm_mpdec_cpudata, cpu).times_cpu_unplugged += 1;
+		pr_info(MPDEC_TAG"CPU[%d] on->off | Mask=[%d%d] | time online: %llu\n",
+		cpu, cpu_online(0), cpu_online(1), on_time);
+		mutex_unlock(&per_cpu(msm_mpdec_cpudata, cpu).hotplug_mutex);
+	}
+	return ret;
+}
+
+static bool mpdec_cpu_up(int cpu) {
+	bool ret;
+	
+	ret = !cpu_online(cpu);
+	if (ret) {
+		mutex_lock(&per_cpu(msm_mpdec_cpudata, cpu).hotplug_mutex);
+		cpu_up(cpu);
+		per_cpu(msm_mpdec_cpudata, cpu).online = true;
+		per_cpu(msm_mpdec_cpudata, cpu).on_time = ktime_to_ms(ktime_get());
+		per_cpu(msm_mpdec_cpudata, cpu).times_cpu_hotplugged += 1;
+		pr_info(MPDEC_TAG"CPU[%d] off->on | Mask=[%d%d]\n",
+			cpu, cpu_online(0), cpu_online(1));
+		mutex_unlock(&per_cpu(msm_mpdec_cpudata, cpu).hotplug_mutex);
+	}
+	return ret;
+}
+
+static int mp_decision(void) {
 	static bool first_call = true;
 	int new_state = MSM_MPDEC_IDLE;
 	int nr_cpu_online;
@@ -98,11 +204,16 @@ static int mp_decision(void)
 	if (current_time <= msm_mpdec_tuners_ins.startdelay)
 		return MSM_MPDEC_IDLE;
 
-	if (first_call) {
+	/* this effectively disables mpdecision when screen is on
+	 * so there is no need to continue */
+	if (msm_mpdec_tuners_ins.min_cpus == CONFIG_NR_CPUS)
+		return MSM_MPDEC_IDLE;
+	
+	if (first_call) 
 		first_call = false;
-	} else {
+	else 
 		this_time = current_time - last_time;
-	}
+	
 	total_time += this_time;
 
 	rq_depth = get_rq_info();
@@ -110,54 +221,59 @@ static int mp_decision(void)
 
 	if (nr_cpu_online) {
 		index = (nr_cpu_online - 1) * 2;
-		if ((nr_cpu_online < 2) && (rq_depth >= NwNs_Threshold[index])) {
+		if ((nr_cpu_online < msm_mpdec_tuners_ins.max_cpus) && 
+		    (rq_depth >= NwNs_Threshold[index])) {
 			if (total_time >= TwTs_Threshold[index]) {
-				if (acpuclk_8x60_get_rate((CONFIG_NR_CPUS - 2)) <=
-					msm_mpdec_tuners_ins.idle_freq) {
-						new_state = MSM_MPDEC_IDLE;
-				}
-				else {
-						new_state = MSM_MPDEC_UP;
-				}
+				new_state = MSM_MPDEC_UP;
+				if (get_slowest_cpu_rate() <= msm_mpdec_tuners_ins.idle_freq)
+					new_state = MSM_MPDEC_IDLE;
 			}
-		} else if (rq_depth <= NwNs_Threshold[index+1]) {
-			if (total_time >= TwTs_Threshold[index+1] ) {
-                                if (cpu_online((CONFIG_NR_CPUS - 1))) {
-		                	if (acpuclk_8x60_get_rate((CONFIG_NR_CPUS - 1)) >
-                                            msm_mpdec_tuners_ins.idle_freq) {
-			                        new_state = MSM_MPDEC_IDLE;
-					}
-					else {
-						new_state = MSM_MPDEC_DOWN;
-					}
-				}
+		} else if ((nr_cpu_online > msm_mpdec_tuners_ins.min_cpus) &&
+			   (rq_depth <= NwNs_Threshold[index+1])) {
+			if (total_time >= TwTs_Threshold[index+1]) {
+				new_state = MSM_MPDEC_DOWN;
+				if (get_slowest_cpu_rate() > msm_mpdec_tuners_ins.idle_freq)
+					new_state = MSM_MPDEC_IDLE;
 			}
 		} else {
 			new_state = MSM_MPDEC_IDLE;
 			total_time = 0;
 		}
-	} else {
+	} else
 		total_time = 0;
-	}
 
-	if (new_state != MSM_MPDEC_IDLE) {
+	if (new_state != MSM_MPDEC_IDLE)
 		total_time = 0;
-	}
 
 	last_time = ktime_to_ms(ktime_get());
-
+#if DEBUG
+	pr_info(MPDEC_TAG"[DEBUG] rq: %u, new_state: %i | Mask=[%d%d]\n",
+		rq_depth, new_state, cpu_online(0), cpu_online(1));
+#endif
 	return new_state;
 }
 
-static void msm_mpdec_work_thread(struct work_struct *work)
-{
+static void msm_mpdec_work_thread(struct work_struct *work) {
 	unsigned int cpu = nr_cpu_ids;
-	cputime64_t on_time = 0;
+	bool suspended = false;
 
-	if (per_cpu(msm_mpdec_cpudata, (CONFIG_NR_CPUS - 1)).device_suspended == true)
+	if (ktime_to_ms(ktime_get()) <= msm_mpdec_tuners_ins.startdelay)
 		goto out;
 
-	if (!mutex_trylock(&msm_cpu_lock))
+	/* Check if we are paused */
+	if (mpdec_paused_until >= ktime_to_ms(ktime_get()))
+		goto out;
+
+	for_each_possible_cpu(cpu) {
+		if ((per_cpu(msm_mpdec_cpudata, cpu).device_suspended == true)) {
+			suspended = true;
+			break;
+		}
+	}
+	if (suspended == true)
+		goto out;
+
+	if (!mutex_trylock(&mpdec_msm_cpu_lock))
 		goto out;
 
 	/* if sth messed with the cpus, update the check vars so we can proceed */
@@ -177,86 +293,84 @@ static void msm_mpdec_work_thread(struct work_struct *work)
 	case MSM_MPDEC_IDLE:
 		break;
 	case MSM_MPDEC_DOWN:
-		cpu = (CONFIG_NR_CPUS - 1);
+		cpu = get_slowest_cpu();
 		if (cpu < nr_cpu_ids) {
-			if ((per_cpu(msm_mpdec_cpudata, cpu).online == true) && (cpu_online(cpu))) {
-				cpu_down(cpu);
-				per_cpu(msm_mpdec_cpudata, cpu).online = false;
-				on_time = ktime_to_ms(ktime_get()) - per_cpu(msm_mpdec_cpudata, cpu).on_time;
-				pr_info(MPDEC_TAG"CPU[%d] on->off | Mask=[%d%d] | time online: %llu\n",
-						cpu, cpu_online(0), cpu_online(1), on_time);
-			} else if (per_cpu(msm_mpdec_cpudata, cpu).online != cpu_online(cpu)) {
-				pr_info(MPDEC_TAG"CPU[%d] was controlled outside of mpdecision! | pausing [%d]ms\n",
+			if (per_cpu(msm_mpdec_cpudata, cpu).online == true) {
+				if (!mpdec_cpu_down(cpu)) {
+					pr_info(MPDEC_TAG"CPU[%d] bypassed mpdecision! | pausing [%d]ms\n",
 						cpu, msm_mpdec_tuners_ins.pause);
-				msleep(msm_mpdec_tuners_ins.pause);
-				was_paused = true;
+					mpdec_paused_until = ktime_to_ms(ktime_get()) + 
+						msm_mpdec_tuners_ins.pause;
+					was_paused = true;
+				}
 			}
 		}
 		break;
 	case MSM_MPDEC_UP:
-		cpu = (CONFIG_NR_CPUS - 1);
+		cpu = cpumask_next_zero(0, cpu_online_mask);
 		if (cpu < nr_cpu_ids) {
-			if ((per_cpu(msm_mpdec_cpudata, cpu).online == false) && (!cpu_online(cpu))) {
-				cpu_up(cpu);
-				per_cpu(msm_mpdec_cpudata, cpu).online = true;
-				per_cpu(msm_mpdec_cpudata, cpu).on_time = ktime_to_ms(ktime_get());
-				pr_info(MPDEC_TAG"CPU[%d] off->on | Mask=[%d%d]\n",
-						cpu, cpu_online(0), cpu_online(1));
-			} else if (per_cpu(msm_mpdec_cpudata, cpu).online != cpu_online(cpu)) {
-				pr_info(MPDEC_TAG"CPU[%d] was controlled outside of mpdecision! | pausing [%d]ms\n",
+			if (per_cpu(msm_mpdec_cpudata, cpu).online == false) {
+				if (!mpdec_cpu_up(cpu)) {
+					pr_info(MPDEC_TAG"CPU[%d] bypassed mpdecision! | pausing [%d]ms\n",
 						cpu, msm_mpdec_tuners_ins.pause);
-				msleep(msm_mpdec_tuners_ins.pause);
-				was_paused = true;
+					mpdec_paused_until = ktime_to_ms(ktime_get()) + 
+						msm_mpdec_tuners_ins.pause;
+					was_paused = true;
+				}
 			}
 		}
 		break;
 	default:
 		pr_err(MPDEC_TAG"%s: invalid mpdec hotplug state %d\n",
-		       __func__, state);
+			__func__, state);
 	}
-	mutex_unlock(&msm_cpu_lock);
+	mutex_unlock(&mpdec_msm_cpu_lock);
 
 out:
 	if (state != MSM_MPDEC_DISABLED)
-		schedule_delayed_work(&msm_mpdec_work,
-				msecs_to_jiffies(msm_mpdec_tuners_ins.delay));
+		queue_delayed_work(msm_mpdec_workq, &msm_mpdec_work,
+				   msecs_to_jiffies(msm_mpdec_tuners_ins.delay));
 	return;
 }
 
-static void msm_mpdec_early_suspend(struct early_suspend *h)
-{
-	int cpu = 0;
-	for_each_possible_cpu(cpu) {
-		mutex_lock(&per_cpu(msm_mpdec_cpudata, cpu).suspend_mutex);
-		if (((cpu >= (CONFIG_NR_CPUS - 1)) && (num_online_cpus() > 1)) && (msm_mpdec_tuners_ins.scroff_single_core)) {
-			cpu_down(cpu);
-			pr_info(MPDEC_TAG"Screen -> off. Suspended CPU%d | Mask=[%d%d]\n",
-					cpu, cpu_online(0), cpu_online(1));
-			per_cpu(msm_mpdec_cpudata, cpu).online = false;
-		}
-		per_cpu(msm_mpdec_cpudata, cpu).device_suspended = true;
-		mutex_unlock(&per_cpu(msm_mpdec_cpudata, cpu).suspend_mutex);
+static void msm_mpdec_early_suspend(struct early_suspend *h) {
+	int cpu = nr_cpu_ids;
+
+	if (!msm_mpdec_tuners_ins.scroff_single_core) {
+		pr_info(MPDEC_TAG"Screen -> off\n");
+		return;
 	}
+
+	/* main work thread can sleep now */
+	cancel_delayed_work_sync(&msm_mpdec_work);
+	
+	for (cpu = 1; cpu < CONFIG_NR_CPUS; cpu++) {
+		mpdec_cpu_down(cpu);
+		per_cpu(msm_mpdec_cpudata, cpu).device_suspended = true;
+	}
+
+	pr_info(MPDEC_TAG"Screen -> off. Deactivated mpdecision.\n");
 }
 
-static void msm_mpdec_late_resume(struct early_suspend *h)
-{
-	int cpu = 0;
-	for_each_possible_cpu(cpu) {
-		mutex_lock(&per_cpu(msm_mpdec_cpudata, cpu).suspend_mutex);
-		if ((cpu >= (CONFIG_NR_CPUS - 1)) && (num_online_cpus() < CONFIG_NR_CPUS)) {
-			/* Always enable cpus when screen comes online.
-			 * This boosts the wakeup process.
-			 */
-			cpu_up(cpu);
-			per_cpu(msm_mpdec_cpudata, cpu).on_time = ktime_to_ms(ktime_get());
-			per_cpu(msm_mpdec_cpudata, cpu).online = true;
-			pr_info(MPDEC_TAG"Screen -> on. Hot plugged CPU%d | Mask=[%d%d]\n",
-					cpu, cpu_online(0), cpu_online(1));
-		}
-		per_cpu(msm_mpdec_cpudata, cpu).device_suspended = false;
-		mutex_unlock(&per_cpu(msm_mpdec_cpudata, cpu).suspend_mutex);
+static void msm_mpdec_late_resume(struct early_suspend *h) {
+	int cpu = nr_cpu_ids;
+
+	if (!msm_mpdec_tuners_ins.scroff_single_core) {
+		pr_info(MPDEC_TAG"Screen -> on\n");
+		return;
 	}
+
+	for (cpu = 1; cpu < CONFIG_NR_CPUS; cpu++) {
+		mpdec_cpu_up(cpu);
+		per_cpu(msm_mpdec_cpudata, cpu).device_suspended = false;
+	}
+
+	/* wake up main work thread */
+	was_paused = true;
+	queue_delayed_work(msm_mpdec_workq, &msm_mpdec_work, 0);
+
+	pr_info(MPDEC_TAG"Screen -> on. Activated mpdecision. | Mask=[%d%d]\n",
+		cpu_online(0), cpu_online(1));
 }
 
 static struct early_suspend msm_mpdec_early_suspend_handler = {
@@ -270,7 +384,7 @@ struct kobject *msm_mpdec_kobject;
 
 #define show_one(file_name, object)					\
 static ssize_t show_##file_name						\
-(struct kobject *kobj, struct attribute *attr, char *buf)               \
+(struct kobject *kobj, struct attribute *attr, char *buf)		\
 {									\
 	return sprintf(buf, "%u\n", msm_mpdec_tuners_ins.object);	\
 }
@@ -279,15 +393,75 @@ show_one(startdelay, startdelay);
 show_one(delay, delay);
 show_one(pause, pause);
 show_one(scroff_single_core, scroff_single_core);
+show_one(min_cpus, min_cpus);
+show_one(max_cpus, max_cpus);
+
+#define show_one_twts(file_name, arraypos)				\
+static ssize_t show_##file_name						\
+(struct kobject *kobj, struct attribute *attr, char *buf)		\
+{									\
+	return sprintf(buf, "%u\n", TwTs_Threshold[arraypos]);		\
+}
+show_one_twts(twts_threshold_0, 0);
+show_one_twts(twts_threshold_1, 1);
+show_one_twts(twts_threshold_2, 2);
+show_one_twts(twts_threshold_3, 3);
+
+#define store_one_twts(file_name, arraypos)				\
+static ssize_t store_##file_name					\
+(struct kobject *a, struct attribute *b, const char *buf, size_t count)	\
+{									\
+	unsigned int input;						\
+	int ret;							\
+	ret = sscanf(buf, "%u", &input);				\
+	if (ret != 1)							\
+		return -EINVAL;						\
+	TwTs_Threshold[arraypos] = input;				\
+	return count;							\
+}									\
+define_one_global_rw(file_name);
+store_one_twts(twts_threshold_0, 0);
+store_one_twts(twts_threshold_1, 1);
+store_one_twts(twts_threshold_2, 2);
+store_one_twts(twts_threshold_3, 3);
+
+#define show_one_nwns(file_name, arraypos)				\
+static ssize_t show_##file_name						\
+(struct kobject *kobj, struct attribute *attr, char *buf)		\
+{									\
+	return sprintf(buf, "%u\n", NwNs_Threshold[arraypos]);		\
+}
+show_one_nwns(nwns_threshold_0, 0);
+show_one_nwns(nwns_threshold_1, 1);
+show_one_nwns(nwns_threshold_2, 2);
+show_one_nwns(nwns_threshold_3, 3);
+
+#define store_one_nwns(file_name, arraypos)				\
+static ssize_t store_##file_name					\
+(struct kobject *a, struct attribute *b, const char *buf, size_t count)	\
+{									\
+	unsigned int input;						\
+	int ret;							\
+	ret = sscanf(buf, "%u", &input);				\
+	if (ret != 1)							\
+		return -EINVAL;						\
+	NwNs_Threshold[arraypos] = input;				\
+	return count;							\
+}									\
+define_one_global_rw(file_name);
+store_one_nwns(nwns_threshold_0, 0);
+store_one_nwns(nwns_threshold_1, 1);
+store_one_nwns(nwns_threshold_2, 2);
+store_one_nwns(nwns_threshold_3, 3);
 
 static ssize_t show_idle_freq (struct kobject *kobj, struct attribute *attr,
-                                   char *buf)
+				char *buf)
 {
 	return sprintf(buf, "%lu\n", msm_mpdec_tuners_ins.idle_freq);
 }
 
 static ssize_t show_enabled(struct kobject *a, struct attribute *b,
-				   char *buf)
+				char *buf)
 {
 	unsigned int enabled;
 	switch (state) {
@@ -305,32 +479,8 @@ static ssize_t show_enabled(struct kobject *a, struct attribute *b,
 	return sprintf(buf, "%u\n", enabled);
 }
 
-static ssize_t show_nwns_threshold_up(struct kobject *kobj, struct attribute *attr,
-					char *buf)
-{
-	return sprintf(buf, "%u\n", NwNs_Threshold[0]);
-}
-
-static ssize_t show_nwns_threshold_down(struct kobject *kobj, struct attribute *attr,
-					char *buf)
-{
-	return sprintf(buf, "%u\n", NwNs_Threshold[3]);
-}
-
-static ssize_t show_twts_threshold_up(struct kobject *kobj, struct attribute *attr,
-					char *buf)
-{
-	return sprintf(buf, "%u\n", TwTs_Threshold[0]);
-}
-
-static ssize_t show_twts_threshold_down(struct kobject *kobj, struct attribute *attr,
-					char *buf)
-{
-	return sprintf(buf, "%u\n", TwTs_Threshold[3]);
-}
-
 static ssize_t store_startdelay(struct kobject *a, struct attribute *b,
-				   const char *buf, size_t count)
+				const char *buf, size_t count)
 {
 	unsigned int input;
 	int ret;
@@ -344,7 +494,7 @@ static ssize_t store_startdelay(struct kobject *a, struct attribute *b,
 }
 
 static ssize_t store_delay(struct kobject *a, struct attribute *b,
-				   const char *buf, size_t count)
+				const char *buf, size_t count)
 {
 	unsigned int input;
 	int ret;
@@ -358,7 +508,7 @@ static ssize_t store_delay(struct kobject *a, struct attribute *b,
 }
 
 static ssize_t store_pause(struct kobject *a, struct attribute *b,
-				   const char *buf, size_t count)
+				const char *buf, size_t count)
 {
 	unsigned int input;
 	int ret;
@@ -372,20 +522,21 @@ static ssize_t store_pause(struct kobject *a, struct attribute *b,
 }
 
 static ssize_t store_idle_freq(struct kobject *a, struct attribute *b,
-				   const char *buf, size_t count)
+				const char *buf, size_t count)
 {
 	long unsigned int input;
 	int ret;
 	ret = sscanf(buf, "%lu", &input);
 	if (ret != 1)
 		return -EINVAL;
-	msm_mpdec_tuners_ins.idle_freq = acpu_check_khz_value(input);
+
+	msm_mpdec_tuners_ins.idle_freq = input;
 
 	return count;
 }
 
 static ssize_t store_scroff_single_core(struct kobject *a, struct attribute *b,
-				   const char *buf, size_t count)
+					const char *buf, size_t count)
 {
 	unsigned int input;
 	int ret;
@@ -405,8 +556,44 @@ static ssize_t store_scroff_single_core(struct kobject *a, struct attribute *b,
 	return count;
 }
 
+static ssize_t store_max_cpus(struct kobject *a, struct attribute *b,
+				const char *buf, size_t count)
+{
+	unsigned int input;
+	int ret;
+	ret = sscanf(buf, "%u", &input);
+
+	if (ret != 1)
+		return -EINVAL;
+	if ((input < 1) || (input > CONFIG_NR_CPUS) || 
+		(input < msm_mpdec_tuners_ins.min_cpus))
+		return -EINVAL;
+
+	msm_mpdec_tuners_ins.max_cpus = input;
+
+	return count;
+}
+
+static ssize_t store_min_cpus(struct kobject *a, struct attribute *b,
+				const char *buf, size_t count)
+{
+	unsigned int input;
+	int ret;
+	ret = sscanf(buf, "%u", &input);
+	
+	if (ret != 1) 
+		return -EINVAL;
+	if ((input < 1) || (input > CONFIG_NR_CPUS) || 
+		(input > msm_mpdec_tuners_ins.max_cpus))
+		return -EINVAL;
+	
+	msm_mpdec_tuners_ins.min_cpus = input;
+
+	return count;
+}
+
 static ssize_t store_enabled(struct kobject *a, struct attribute *b,
-				   const char *buf, size_t count)
+				const char *buf, size_t count)
 {
 	unsigned int cpu, input, enabled;
 	int ret;
@@ -433,82 +620,21 @@ static ssize_t store_enabled(struct kobject *a, struct attribute *b,
 	switch (buf[0]) {
 	case '0':
 		state = MSM_MPDEC_DISABLED;
-		cpu = (CONFIG_NR_CPUS - 1);
-		if (!cpu_online(cpu)) {
-			per_cpu(msm_mpdec_cpudata, cpu).on_time = ktime_to_ms(ktime_get());
-			per_cpu(msm_mpdec_cpudata, cpu).online = true;
-			cpu_up(cpu);
-			pr_info(MPDEC_TAG"nap time... Hot plugged CPU[%d] | Mask=[%d%d]\n",
-					 cpu, cpu_online(0), cpu_online(1));
-		} else {
-			pr_info(MPDEC_TAG"nap time...\n");
-		}
+		cancel_delayed_work_sync(&msm_mpdec_work);
+		for (cpu = 1; cpu < CONFIG_NR_CPUS; cpu++)
+			mpdec_cpu_up(cpu);
+		pr_info(MPDEC_TAG"msm_mpdecision disabled\n");
 		break;
 	case '1':
 		state = MSM_MPDEC_IDLE;
 		was_paused = true;
-		schedule_delayed_work(&msm_mpdec_work, 0);
-		pr_info(MPDEC_TAG"firing up mpdecision...\n");
+		queue_delayed_work(msm_mpdec_workq, &msm_mpdec_work,
+				msecs_to_jiffies(msm_mpdec_tuners_ins.delay));
+		pr_info(MPDEC_TAG"msm_mpdecision enabled\n");
 		break;
 	default:
 		ret = -EINVAL;
 	}
-	return count;
-}
-
-static ssize_t store_nwns_threshold_up(struct kobject *a, struct attribute *b,
-				   const char *buf, size_t count)
-{
-	unsigned int input;
-	int ret;
-	ret = sscanf(buf, "%u", &input);
-	if (ret != 1)
-		return -EINVAL;
-
-	NwNs_Threshold[0] = input;
-
-	return count;
-}
-
-static ssize_t store_nwns_threshold_down(struct kobject *a, struct attribute *b,
-				   const char *buf, size_t count)
-{
-	unsigned int input;
-	int ret;
-	ret = sscanf(buf, "%u", &input);
-	if (ret != 1)
-		return -EINVAL;
-
-	NwNs_Threshold[3] = input;
-
-	return count;
-}
-
-static ssize_t store_twts_threshold_up(struct kobject *a, struct attribute *b,
-				   const char *buf, size_t count)
-{
-	unsigned int input;
-	int ret;
-	ret = sscanf(buf, "%u", &input);
-	if (ret != 1)
-		return -EINVAL;
-
-	TwTs_Threshold[0] = input;
-
-	return count;
-}
-
-static ssize_t store_twts_threshold_down(struct kobject *a, struct attribute *b,
-				   const char *buf, size_t count)
-{
-	unsigned int input;
-	int ret;
-	ret = sscanf(buf, "%u", &input);
-	if (ret != 1)
-		return -EINVAL;
-
-	TwTs_Threshold[3] = input;
-
 	return count;
 }
 
@@ -517,11 +643,9 @@ define_one_global_rw(delay);
 define_one_global_rw(pause);
 define_one_global_rw(scroff_single_core);
 define_one_global_rw(idle_freq);
+define_one_global_rw(min_cpus);
+define_one_global_rw(max_cpus);
 define_one_global_rw(enabled);
-define_one_global_rw(nwns_threshold_up);
-define_one_global_rw(nwns_threshold_down);
-define_one_global_rw(twts_threshold_up);
-define_one_global_rw(twts_threshold_down);
 
 static struct attribute *msm_mpdec_attributes[] = {
 	&startdelay.attr,
@@ -529,11 +653,17 @@ static struct attribute *msm_mpdec_attributes[] = {
 	&pause.attr,
 	&scroff_single_core.attr,
 	&idle_freq.attr,
+	&min_cpus.attr,
+	&max_cpus.attr,
 	&enabled.attr,
-	&nwns_threshold_up.attr,
-	&nwns_threshold_down.attr,
-	&twts_threshold_up.attr,
-	&twts_threshold_down.attr,
+	&twts_threshold_0.attr,
+	&twts_threshold_1.attr,
+	&twts_threshold_2.attr,
+	&twts_threshold_3.attr,
+	&nwns_threshold_0.attr,
+	&nwns_threshold_1.attr,
+	&nwns_threshold_2.attr,
+	&nwns_threshold_3.attr,
 	NULL
 };
 
@@ -542,31 +672,108 @@ static struct attribute_group msm_mpdec_attr_group = {
 	.attrs = msm_mpdec_attributes,
 	.name = "conf",
 };
+
+/********* STATS START *********/
+
+static ssize_t show_time_cpus_on(struct kobject *a, struct attribute *b,
+				char *buf)
+{
+	ssize_t len = 0;
+	int cpu = 0;
+
+	for_each_possible_cpu(cpu) {
+		if (cpu_online(cpu)) {
+			len += sprintf(buf + len, "%i %llu\n", cpu,
+				(per_cpu(msm_mpdec_cpudata, cpu).on_time_total +
+				(ktime_to_ms(ktime_get()) -
+				per_cpu(msm_mpdec_cpudata, cpu).on_time)));
+		} else
+			len += sprintf(buf + len, "%i %llu\n", cpu, per_cpu(msm_mpdec_cpudata, cpu).on_time_total);
+	}
+
+	return len;
+}
+define_one_global_ro(time_cpus_on);
+
+static ssize_t show_times_cpus_hotplugged(struct kobject *a, struct attribute *b,
+					char *buf)
+{
+	ssize_t len = 0;
+	int cpu = 0;
+
+	for_each_possible_cpu(cpu) {
+		len += sprintf(buf + len, "%i %llu\n", cpu, per_cpu(msm_mpdec_cpudata, cpu).times_cpu_hotplugged);
+	}
+
+	return len;
+}
+define_one_global_ro(times_cpus_hotplugged);
+
+static ssize_t show_times_cpus_unplugged(struct kobject *a, struct attribute *b,
+					char *buf)
+{
+	ssize_t len = 0;
+	int cpu = 0;
+
+	for_each_possible_cpu(cpu) {
+		len += sprintf(buf + len, "%i %llu\n", cpu, per_cpu(msm_mpdec_cpudata, cpu).times_cpu_unplugged);
+	}
+
+	return len;
+}
+define_one_global_ro(times_cpus_unplugged);
+
+static struct attribute *msm_mpdec_stats_attributes[] = {
+	&time_cpus_on.attr,
+	&times_cpus_hotplugged.attr,
+	&times_cpus_unplugged.attr,
+	NULL
+};
+
+
+static struct attribute_group msm_mpdec_stats_attr_group = {
+	.attrs = msm_mpdec_stats_attributes,
+	.name = "stats",
+};
 /**************************** SYSFS END ****************************/
 
-static int __init msm_mpdec(void)
-{
+static int __init msm_mpdec_init(void) {
 	int cpu, rc, err = 0;
 
 	for_each_possible_cpu(cpu) {
-		mutex_init(&(per_cpu(msm_mpdec_cpudata, cpu).suspend_mutex));
+		mutex_init(&(per_cpu(msm_mpdec_cpudata, cpu).hotplug_mutex));
 		per_cpu(msm_mpdec_cpudata, cpu).device_suspended = false;
 		per_cpu(msm_mpdec_cpudata, cpu).online = true;
+		per_cpu(msm_mpdec_cpudata, cpu).on_time_total = 0;
+		per_cpu(msm_mpdec_cpudata, cpu).times_cpu_unplugged = 0;
+		per_cpu(msm_mpdec_cpudata, cpu).times_cpu_hotplugged = 0;
 	}
 
+	was_paused = true;
+
+	msm_mpdec_workq = alloc_workqueue("mpdec",
+					WQ_UNBOUND | WQ_RESCUER | WQ_FREEZABLE, 1);
+	if (!msm_mpdec_workq)
+		return -ENOMEM;
 	INIT_DELAYED_WORK(&msm_mpdec_work, msm_mpdec_work_thread);
 	if (state != MSM_MPDEC_DISABLED)
-		schedule_delayed_work(&msm_mpdec_work, 0);
+		queue_delayed_work(msm_mpdec_workq, &msm_mpdec_work,
+				   msecs_to_jiffies(msm_mpdec_tuners_ins.delay));
 
 	register_early_suspend(&msm_mpdec_early_suspend_handler);
 
 	msm_mpdec_kobject = kobject_create_and_add("msm_mpdecision", kernel_kobj);
 	if (msm_mpdec_kobject) {
 		rc = sysfs_create_group(msm_mpdec_kobject,
-							&msm_mpdec_attr_group);
-		if (rc) {
+					&msm_mpdec_attr_group);
+		if (rc) 
 			pr_warn(MPDEC_TAG"sysfs: ERROR, could not create sysfs group");
-		}
+		
+		rc = sysfs_create_group(msm_mpdec_kobject,
+				&msm_mpdec_stats_attr_group);
+		if (rc) 
+			pr_warn(MPDEC_TAG"sysfs: ERROR, could not create sysfs stats group");
+		
 	} else
 		pr_warn(MPDEC_TAG"sysfs: ERROR, could not create sysfs kobj");
 
@@ -574,6 +781,10 @@ static int __init msm_mpdec(void)
 
 	return err;
 }
+late_initcall(msm_mpdec_init);
 
-late_initcall(msm_mpdec);
+void msm_mpdec_exit(void) {
+	destroy_workqueue(msm_mpdec_workq);
+	destroy_workqueue(msm_mpdec_workq);
+}
 
