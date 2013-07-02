@@ -347,6 +347,13 @@ int set_two_phase_freq_badass(int cpufreq);
 int set_three_phase_freq_badass(int cpufreq);
 #endif
 
+#ifdef CONFIG_CMDLINE_OPTIONS
+	/* setters for cmdline_gpu */
+	int set_kgsl_3d0_freq(unsigned int freq0, unsigned int freq1);
+	int set_kgsl_2d0_freq(unsigned int freq);
+	int set_kgsl_2d1_freq(unsigned int freq);
+#endif
+
 int __init vigor_init_panel(struct resource *res, size_t size);
 
 #ifdef CONFIG_CPU_FREQ_GOV_ONDEMAND_2_PHASE
@@ -7938,6 +7945,13 @@ static void __init msm8x60_init(struct msm_board_data *board_data)
 	if (system_rev > 0) {
 		i2c_register_board_info(MSM_GSBI7_QUP_I2C_BUS_ID, vigor_flashlight_XB, ARRAY_SIZE(vigor_flashlight_XB));
 		}
+#endif
+
+#ifdef CONFIG_CMDLINE_OPTIONS
+	/* setters for cmdline_gpu */
+	set_kgsl_3d0_freq(cmdline_3dgpu[0], cmdline_3dgpu[1]);
+	set_kgsl_2d0_freq(cmdline_2dgpu);
+	set_kgsl_2d1_freq(cmdline_2dgpu);
 #endif
 
 #ifdef CONFIG_FB_MSM_HDMI_MHL
