@@ -3931,7 +3931,7 @@ static struct platform_device *early_devices[] __initdata = {
 static struct tsens_platform_data pyr_tsens_pdata = {
                 .tsens_factor 			= 1000,
                 .hw_type                = MSM_8660,
-                .tsens_num_sensor       = 1,
+                .tsens_num_sensor       = 6,
                 .slope                  = 702,
 };
 
@@ -7806,7 +7806,6 @@ static void __init msm8x60_init(struct msm_board_data *board_data)
 	struct regulator *margin_power;
 
 	msm_tsens_early_init(&pyr_tsens_pdata);
-
 	/*
 	 * Initialize RPM first as other drivers and devices may need
 	 * it for their initialization.

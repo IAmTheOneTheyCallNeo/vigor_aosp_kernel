@@ -119,3 +119,4 @@ config THERMAL_MONITOR
 	  absence of a system wide thermal monitoring entity or until such an
 	  entity starts running in the userspace. Monitors TSENS temperature
 	  and limits the max frequency of the cores.
+
