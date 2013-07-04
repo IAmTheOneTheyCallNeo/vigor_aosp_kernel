@@ -47,6 +47,8 @@
 #include <linux/i2c/bq27520.h>
 #include "sysinfo-8x60.h"
 
+#include <linux/persistent_ram.h>
+
 #ifdef CONFIG_ANDROID_PMEM
 #include <linux/android_pmem.h>
 #endif
@@ -3309,6 +3311,23 @@ static struct platform_device hdmi_msm_device = {
 };
 #endif /* CONFIG_FB_MSM_HDMI_MSM_PANEL */
 
+static struct platform_device ram_console_device = {
+	.name    = "ram_console",
+	.id    = -1,
+};
+
+struct persistent_ram_descriptor ram_console_desc = {
+	.name = "ram_console",
+	.size = MSM_RAM_CONSOLE_SIZE,
+};
+
+struct persistent_ram ram_console_ram = {
+	.start = MSM_RAM_CONSOLE_BASE,
+	.size = MSM_RAM_CONSOLE_SIZE,
+	.num_descs = 1,
+	.descs = &ram_console_desc,
+};
+
 static void __init msm8x60_allocate_memory_regions(void)
 {
 	unsigned long size;
@@ -3319,6 +3338,8 @@ static void __init msm8x60_allocate_memory_regions(void)
 	pr_info("allocating %lu bytes at %p (%lx physical) for fb\n",
 		size, __va(msm_fb_resources[0].start),
 		(unsigned long)msm_fb_resources[0].start);
+  
+	persistent_ram_early_init(&ram_console_ram);
 }
 
 
@@ -4826,21 +4847,6 @@ static struct platform_device *asoc_devices[] __initdata = {
 	&asoc_msm_pcm,
 	&asoc_msm_dai0,
 	&asoc_msm_dai1,
-};
-
-static struct resource ram_console_resources[] = {
-	{
-		.start	= MSM_RAM_CONSOLE_BASE,
-		.end	= MSM_RAM_CONSOLE_BASE + MSM_RAM_CONSOLE_SIZE - 1,
-		.flags	= IORESOURCE_MEM,
-	},
-};
-
-static struct platform_device ram_console_device = {
-	.name		= "ram_console",
-	.id		= -1,
-	.num_resources	= ARRAY_SIZE(ram_console_resources),
-	.resource	= ram_console_resources,
 };
 
 /*
