@@ -86,7 +86,7 @@ static struct user_wake_lock *lookup_wake_lock_name(
 		if (!diff && l->name[name_len])
 			diff = -1;
 		if (debug_mask & DEBUG_ERROR)
-			pr_info("lookup_wake_lock_name: compare %.*s %s %d\n",
+			pr_info("lookup_wake_lock_name: %.*s not found\n",
 				name_len, buf, l->name, diff);
 
 		if (diff < 0)
@@ -100,7 +100,7 @@ static struct user_wake_lock *lookup_wake_lock_name(
 	/* Allocate and add new wakelock to rbtree */
 	if (!allocate) {
 		if (debug_mask & DEBUG_ERROR)
-			pr_info("lookup_wake_lock_name: %.*s not found\n",
+			pr_err("lookup_wake_lock_name: failed to allocate "
 				name_len, buf);
 		return ERR_PTR(-EINVAL);
 	}
