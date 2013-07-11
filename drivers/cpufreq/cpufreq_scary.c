@@ -43,9 +43,9 @@
 
 static unsigned int suspended;
 static unsigned int sleep_max_freq = 486000;
-static unsigned int sleep_min_freq = 192000;
-static unsigned int sleep_prev_freq = 192000;
-static unsigned int sleep_prev_max = 1512000;
+static unsigned int sleep_min_freq = 96000;
+static unsigned int sleep_prev_freq = 96000;
+static unsigned int sleep_prev_max = 1566000;
 
 /*
  * The polling frequency of this governor depends on the capability of
