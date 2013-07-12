@@ -205,6 +205,7 @@ static struct clkctl_acpu_speed acpu_freq_tbl_hate[] = {
   /* MAX_AXI row is used to source CPU cores and L2 from the AFAB clock. */
   { {0, 0},  MAX_AXI, ACPU_AFAB,  1, 0, 0, 0,    L2(0),   825000, 0x03006000},
   { {1, 1},  192000,  ACPU_PLL_8, 3, 0, 0, 0,    L2(1),   800000, 0x03006000},
+  { {1, 1},  270000,  ACPU_PLL_8, 3, 0, 0, 0,    L2(1),   800000, 0x03006000},
   { {1, 1},  384000,  ACPU_PLL_8, 3, 0, 0, 0,    L2(1),   850000, 0x03006000},
   { {1, 1},  432000,  ACPU_SCPLL, 0, 0, 1, 0x08, L2(1),   850000, 0x03006000},
   { {1, 1},  486000,  ACPU_SCPLL, 0, 0, 1, 0x09, L2(2),   875000, 0x03006000},
