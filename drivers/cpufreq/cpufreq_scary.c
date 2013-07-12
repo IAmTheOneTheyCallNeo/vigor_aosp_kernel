@@ -43,8 +43,8 @@
 
 static unsigned int suspended;
 static unsigned int sleep_max_freq = 486000;
-static unsigned int sleep_min_freq = 108000;
-static unsigned int sleep_prev_freq = 108000;
+static unsigned int sleep_min_freq = 96000;
+static unsigned int sleep_prev_freq = 96000;
 static unsigned int sleep_prev_max = 1512000;
 
 /*
