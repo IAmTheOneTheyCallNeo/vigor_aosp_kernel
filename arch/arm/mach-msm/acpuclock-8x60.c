@@ -155,10 +155,10 @@ struct clkctl_acpu_speed {
 		.num_paths = 1, \
 	}
 static struct msm_bus_paths bw_level_tbl[] = {
-	[0] = BW_MBPS(1064), /* At least 133 MHz on bus. */
+	[0] = BW_MBPS(1200), /* At least 150 MHz on bus. */
 	[1] = BW_MBPS(1600), /* At least 200 MHz on bus. */
-	[2] = BW_MBPS(2136), /* At least 267 MHz on bus. */
-	[3] = BW_MBPS(3040), /* At least 380 MHz on bus. */
+	[2] = BW_MBPS(2400), /* At least 300 MHz on bus. */
+	[3] = BW_MBPS(3200), /* At least 400 MHz on bus. */
 	[4] = BW_MBPS(3600), /* At least 450 MHz on bus. */
 };
 
