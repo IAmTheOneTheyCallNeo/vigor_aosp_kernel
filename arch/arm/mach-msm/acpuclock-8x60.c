@@ -47,7 +47,7 @@
 #define FREQ_TABLE_SIZE		34 /* =  0x22 */
 
 #define MAX_VDD_SC		1400000 /* uV */
-#define MIN_VDD_SC		 725000 /* uV */
+#define MIN_VDD_SC		 750000 /* uV */
 #define MAX_VDD_MEM		1400000 /* uV */
 #define MAX_VDD_DIG		1200000 /* uV */
 #define MAX_AXI			 310500 /* KHz */
