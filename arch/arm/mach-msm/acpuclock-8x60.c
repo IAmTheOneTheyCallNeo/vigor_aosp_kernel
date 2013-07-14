@@ -201,7 +201,7 @@ static struct clkctl_l2_speed l2_freq_tbl_v2[] = {
 #define L2(x) (&l2_freq_tbl_v2[(x)])
 /* SCPLL frequencies = 2 * 27 MHz * L_VAL */
 static struct clkctl_acpu_speed acpu_freq_tbl_hate[] = {
-  { {1, 1},  96000,  ACPU_PLL_8, 3, 1, 0, 0,    L2(1),   775000, 0x03006000},
+  { {1, 1},  192000,  ACPU_PLL_8, 3, 1, 0, 0,    L2(1),   800000, 0x03006000},
   /* MAX_AXI row is used to source CPU cores and L2 from the AFAB clock. */
   { {0, 0},  MAX_AXI, ACPU_AFAB,  1, 0, 0, 0,    L2(0),   850000, 0x03006000},
   { {1, 1},  384000,  ACPU_PLL_8, 3, 0, 0, 0,    L2(1),   850000, 0x03006000},
@@ -843,7 +843,7 @@ uint32_t acpu_check_khz_value(unsigned long khz)
         if (khz > 1836000)
                 return CONFIG_MSM_CPU_FREQ_MAX;
 
-        if (khz < 96000)
+        if (khz < 192000)
                 return CONFIG_MSM_CPU_FREQ_MIN;
 
         for (f = acpu_freq_tbl_hate; f->acpuclk_khz != 0; f++) {
