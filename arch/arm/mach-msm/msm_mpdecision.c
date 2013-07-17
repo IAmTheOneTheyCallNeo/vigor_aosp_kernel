@@ -32,11 +32,10 @@
 #include <linux/hrtimer.h>
 #include <linux/delay.h>
 
-#define MPDEC_TAG                       "[MPDEC]: "
-#define MSM_MPDEC_STARTDELAY            20000
-#define MSM_MPDEC_DELAY                 130
-#define MSM_MPDEC_PAUSE                 10000
-#define MSM_MPDEC_IDLE_FREQ             486000
+#define MPDEC_TAG "[MPDEC]: "
+#define MSM_MPDEC_STARTDELAY 40000
+#define MSM_MPDEC_DELAY 130
+#define MSM_MPDEC_PAUSE 10000
 
 enum {
 	MSM_MPDEC_DISABLED = 0,
@@ -61,21 +60,17 @@ static struct msm_mpdec_tuners {
 	unsigned int delay;
 	unsigned int pause;
 	bool scroff_single_core;
-	unsigned long int idle_freq;
 } msm_mpdec_tuners_ins = {
 	.startdelay = MSM_MPDEC_STARTDELAY,
 	.delay = MSM_MPDEC_DELAY,
 	.pause = MSM_MPDEC_PAUSE,
 	.scroff_single_core = true,
-	.idle_freq = MSM_MPDEC_IDLE_FREQ,
 };
 
 static unsigned int NwNs_Threshold[4] = {16, 0, 0, 8};
 static unsigned int TwTs_Threshold[4] = {140, 0, 0, 140};
 
 extern unsigned int get_rq_info(void);
-extern unsigned long acpuclk_8x60_get_rate(int);
-
 unsigned int state = MSM_MPDEC_IDLE;
 bool was_paused = false;
 
@@ -112,25 +107,11 @@ static int mp_decision(void)
 		index = (nr_cpu_online - 1) * 2;
 		if ((nr_cpu_online < 2) && (rq_depth >= NwNs_Threshold[index])) {
 			if (total_time >= TwTs_Threshold[index]) {
-				if (acpuclk_8x60_get_rate((CONFIG_NR_CPUS - 2)) <=
-					msm_mpdec_tuners_ins.idle_freq) {
-						new_state = MSM_MPDEC_IDLE;
-				}
-				else {
-						new_state = MSM_MPDEC_UP;
-				}
+				new_state = MSM_MPDEC_UP;
 			}
 		} else if (rq_depth <= NwNs_Threshold[index+1]) {
 			if (total_time >= TwTs_Threshold[index+1] ) {
-                                if (cpu_online((CONFIG_NR_CPUS - 1))) {
-		                	if (acpuclk_8x60_get_rate((CONFIG_NR_CPUS - 1)) >
-                                            msm_mpdec_tuners_ins.idle_freq) {
-			                        new_state = MSM_MPDEC_IDLE;
-					}
-					else {
-						new_state = MSM_MPDEC_DOWN;
-					}
-				}
+				new_state = MSM_MPDEC_DOWN;
 			}
 		} else {
 			new_state = MSM_MPDEC_IDLE;
@@ -280,12 +261,6 @@ show_one(delay, delay);
 show_one(pause, pause);
 show_one(scroff_single_core, scroff_single_core);
 
-static ssize_t show_idle_freq (struct kobject *kobj, struct attribute *attr,
-                                   char *buf)
-{
-	return sprintf(buf, "%lu\n", msm_mpdec_tuners_ins.idle_freq);
-}
-
 static ssize_t show_enabled(struct kobject *a, struct attribute *b,
 				   char *buf)
 {
@@ -367,19 +342,6 @@ static ssize_t store_pause(struct kobject *a, struct attribute *b,
 		return -EINVAL;
 
 	msm_mpdec_tuners_ins.pause = input;
-
-	return count;
-}
-
-static ssize_t store_idle_freq(struct kobject *a, struct attribute *b,
-				   const char *buf, size_t count)
-{
-	long unsigned int input;
-	int ret;
-	ret = sscanf(buf, "%lu", &input);
-	if (ret != 1)
-		return -EINVAL;
-	msm_mpdec_tuners_ins.idle_freq = acpu_check_khz_value(input);
 
 	return count;
 }
@@ -516,7 +478,6 @@ define_one_global_rw(startdelay);
 define_one_global_rw(delay);
 define_one_global_rw(pause);
 define_one_global_rw(scroff_single_core);
-define_one_global_rw(idle_freq);
 define_one_global_rw(enabled);
 define_one_global_rw(nwns_threshold_up);
 define_one_global_rw(nwns_threshold_down);
@@ -528,7 +489,6 @@ static struct attribute *msm_mpdec_attributes[] = {
 	&delay.attr,
 	&pause.attr,
 	&scroff_single_core.attr,
-	&idle_freq.attr,
 	&enabled.attr,
 	&nwns_threshold_up.attr,
 	&nwns_threshold_down.attr,
