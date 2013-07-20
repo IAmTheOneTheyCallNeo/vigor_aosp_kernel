@@ -582,7 +582,6 @@ static int __init msm_mpdec(void)
 	rq_info.def_start_time = ktime_to_ns(ktime_get());
 	rq_info.rq_poll_last_jiffy = 0;
 	rq_info.def_timer_last_jiffy = 0;
-	rq_info.hotplug_disabled = 0;
 	rq_info.init = 1;
 
 	for_each_possible_cpu(cpu) {
