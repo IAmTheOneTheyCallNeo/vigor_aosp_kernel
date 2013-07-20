@@ -81,13 +81,13 @@ static unsigned long up_sample_time;
 /*
  * The minimum amount of time to spend at a frequency before we can step down.
  */
-#define DEFAULT_DOWN_SAMPLE_TIME 30 * USEC_PER_MSEC
+#define DEFAULT_DOWN_SAMPLE_TIME 40 * USEC_PER_MSEC
 static unsigned long down_sample_time;
 
 /*
  * CPU freq will be increased if measured load > inc_cpu_load;
  */
-#define DEFAULT_INC_CPU_LOAD 85
+#define DEFAULT_INC_CPU_LOAD 80
 static unsigned long inc_cpu_load;
 
 /*
@@ -122,7 +122,7 @@ static unsigned long pump_down_step;
  */
 static unsigned int early_suspended;
 
-#define SCREEN_OFF_LOWEST_STEP 		(0x91050)
+#define SCREEN_OFF_LOWEST_STEP 		(0x76A70)
 #define DEFAULT_SCREEN_OFF_MIN_STEP	(SCREEN_OFF_LOWEST_STEP)
 static unsigned long screen_off_min_step;
 
@@ -155,18 +155,18 @@ static unsigned int get_lulzfreq_table_size(struct cpufreq_lulzactive_cpuinfo *p
 
 static inline void fix_screen_off_min_step(struct cpufreq_lulzactive_cpuinfo *pcpu) {
 	if (pcpu->lulzfreq_table_size <= 0) {
-		screen_off_min_step = 5;
+		screen_off_min_step = 4;
 		return;
 	}
 	
 	if (DEFAULT_SCREEN_OFF_MIN_STEP == screen_off_min_step) 
-		for(screen_off_min_step=5;
-		pcpu->lulzfreq_table[screen_off_min_step].frequency != 594000;
+		for(screen_off_min_step=4;
+		pcpu->lulzfreq_table[screen_off_min_step].frequency != 486000;
 		screen_off_min_step++);
 	
 	if (screen_off_min_step >= pcpu->lulzfreq_table_size)
-		for(screen_off_min_step=5;
-		pcpu->lulzfreq_table[screen_off_min_step].frequency != 594000;
+		for(screen_off_min_step=4;
+		pcpu->lulzfreq_table[screen_off_min_step].frequency != 486000;
 		screen_off_min_step++);
 }
 
