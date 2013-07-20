@@ -75,19 +75,19 @@ static cputime64_t hispeed_freq = 1350000;
 /*
  * The minimum amount of time to spend at a frequency before we can step up.
  */
-#define DEFAULT_UP_SAMPLE_TIME 20 * USEC_PER_MSEC
+#define DEFAULT_UP_SAMPLE_TIME 15 * USEC_PER_MSEC
 static unsigned long up_sample_time;
 
 /*
  * The minimum amount of time to spend at a frequency before we can step down.
  */
-#define DEFAULT_DOWN_SAMPLE_TIME 40 * USEC_PER_MSEC
+#define DEFAULT_DOWN_SAMPLE_TIME 30 * USEC_PER_MSEC
 static unsigned long down_sample_time;
 
 /*
  * CPU freq will be increased if measured load > inc_cpu_load;
  */
-#define DEFAULT_INC_CPU_LOAD 60
+#define DEFAULT_INC_CPU_LOAD 85
 static unsigned long inc_cpu_load;
 
 /*
