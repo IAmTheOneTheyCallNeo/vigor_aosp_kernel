@@ -2883,9 +2883,13 @@ static int atmel_224e_ts_resume(struct i2c_client *client)
 			get_object_address(ts, GEN_COMMANDPROCESSOR_T6) +
 			T6_CFG_CALIBRATE, 0x55);
 	}
-
+#ifdef CONFIG_TOUCHSCREEN_ATMEL_SWEEP2WAKE
+        if (s2w_switch == 0) {
+#endif
 	enable_irq(client->irq);
-
+#ifdef CONFIG_TOUCHSCREEN_ATMEL_SWEEP2WAKE
+        }
+#endif
 	msleep(5);
 	ret = unlock_recalib(2);
 	msleep(5);
